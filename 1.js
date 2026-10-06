@@ -19,6 +19,7 @@
         apiKey: localStorage.getItem('gemini_api_key') || '',
         model: localStorage.getItem('gemini_model') || 'gemini-2.5-flash',
         autoSelectOnPage: localStorage.getItem('auto_select_answers') !== 'false',
+        showHighlight: localStorage.getItem('show_highlight_answers') !== 'false',
         buttonSize: 56,
         panelWidth: 460,
         panelHeight: 660
@@ -43,6 +44,7 @@
         activeTab: 'questions', // 'questions' | 'paste' | 'settings'
         filterType: 'all',      // 'all' | 'choice' | 'matching'
         autoSelect: DEFAULT_CONFIG.autoSelectOnPage,
+        showHighlight: DEFAULT_CONFIG.showHighlight,
         isPageRenderedByUs: false
     };
 
@@ -420,122 +422,146 @@
         }
     }
 
-    // ====== HÀM LÀM NỔI BẬT ĐÁP ÁN TRÊN TRANG WEB ======
-    function highlightAnswersOnWebPage(answers) {
-        if (!answers || !answers.length) return;
+    // ====== HÀM LÀM NỔI BẬT ĐÁP ÁN CHUẨN XÁC TRÊN TRANG WEB ======
+    function applyHighlightsToCurrentPage() {
+        // Xóa highlight cũ trước khi vẽ lại
+        clearAllHighlightsFromWebPage();
 
-        answers.forEach(ans => {
-            const qIndex = ans.question_index;
-            const q = STATE.questions.find(item => item.index === qIndex);
-            if (!q) return;
+        if (!STATE.showHighlight) return;
 
-            // Đổi màu nút số câu bên trái
-            const navBtn = document.getElementById(`__nav_btn_${qIndex}`) || document.getElementById(`btn-question-${qIndex}`);
+        const solved = STATE.solvedAnswers;
+        if (!solved || Object.keys(solved).length === 0) return;
+
+        // Đổi màu viền các nút số câu trong sidebar (btn-question-0 .. 24)
+        Object.keys(solved).forEach(key => {
+            const qIdx = parseInt(key, 10);
+            const i = qIdx - 1;
+            const navBtn = document.getElementById(`btn-question-${i}`) || document.getElementById(`__nav_btn_${qIdx}`);
             if (navBtn) {
-                navBtn.style.backgroundColor = '#10b981';
-                navBtn.style.borderColor = '#059669';
-                navBtn.style.color = '#ffffff';
-                navBtn.style.fontWeight = 'bold';
+                navBtn.style.boxShadow = '0 0 0 2px #10b981';
             }
+        });
 
-            // Xử lý câu hỏi trắc nghiệm (Choice)
-            if (q.type === 'choice') {
-                const letter = (ans.selected_choice || '').trim().toUpperCase();
-                const matchedChoice = q.choices.find(c => c.letter.toUpperCase() === letter);
-                const targetChoiceId = matchedChoice ? matchedChoice.id : null;
+        // 1. Kiểm tra các câu hỏi ĐANG HIỂN THỊ trong hệ thống thi FPT Exam (#div-exam-content)
+        const activeCards = document.querySelectorAll('div[id^="question-content-"]');
+        if (activeCards.length > 0) {
+            activeCards.forEach(card => {
+                const cardId = card.id; // e.g. "question-content-0"
+                const match = cardId.match(/question-content-(\d+)/);
+                if (!match) return;
+                const i = parseInt(match[1], 10); // 0-based
+                const qIdx = i + 1; // 1-based
+                const ans = solved[qIdx];
+                if (!ans) return;
 
-                // 1. Thử tìm trên giao diện do script tự render
-                if (targetChoiceId) {
-                    const row = document.getElementById(`__opt_row_${targetChoiceId}`);
-                    if (row) {
-                        applyHighlightToElement(row, `✅ ĐÁP ÁN ĐÚNG (${letter})`);
-                        if (STATE.autoSelect) {
-                            const radio = row.querySelector('input[type="radio"]');
-                            if (radio) {
-                                radio.checked = true;
-                                radio.dispatchEvent(new Event('change', { bubbles: true }));
-                            }
+                const isMatching = (ans.type === 'matching') || Array.isArray(ans.matching);
+
+                // Câu hỏi trắc nghiệm (Choice)
+                if (!isMatching && (ans.selected_choice || ans.selected_text)) {
+                    let optIndex = -1;
+                    let letter = '';
+                    if (ans.selected_choice) {
+                        const raw = String(ans.selected_choice).trim().toUpperCase();
+                        const firstChar = raw.charAt(0);
+                        if (LETTERS.includes(firstChar)) {
+                            letter = firstChar;
+                            optIndex = LETTERS.indexOf(firstChar);
+                        }
+                    }
+
+                    if (optIndex >= 0) {
+                        const optContainer = card.querySelector(`#question-single-${i}-input-${optIndex}-container`) ||
+                                             card.querySelector(`#question-multi-${i}-input-${optIndex}-container`) ||
+                                             document.getElementById(`question-single-${i}-input-${optIndex}-container`) ||
+                                             document.getElementById(`question-multi-${i}-input-${optIndex}-container`);
+                        if (optContainer) {
+                            applyHighlightToElement(optContainer, `✅ ĐÁP ÁN: ${letter}`);
                         }
                     }
                 }
 
-                // 2. Thử tìm trên giao diện gốc của FPT EduNext / EOS
-                const allRadios = document.querySelectorAll(`input[type="radio"], input[type="checkbox"]`);
-                allRadios.forEach(inp => {
-                    const isMatch = (targetChoiceId && (inp.value === targetChoiceId || inp.id === targetChoiceId)) ||
-                                    (inp.name && inp.name.includes(`_${qIndex}`) && inp.value === letter);
-                    if (isMatch) {
-                        const parent = inp.closest('.form-check, .choice-item, tr, div') || inp.parentElement;
-                        if (parent) {
-                            applyHighlightToElement(parent, `✅ ĐÁP ÁN ĐÚNG (${letter})`);
-                            if (STATE.autoSelect) {
-                                inp.checked = true;
-                                inp.dispatchEvent(new Event('change', { bubbles: true }));
-                            }
-                        }
-                    }
-                });
+                // Câu hỏi ghép đôi (Matching)
+                else if (isMatching && Array.isArray(ans.matching)) {
+                    ans.matching.forEach(pair => {
+                        const mIdx = (pair.item_index || 1) - 1; // 0-based
+                        const val = String(pair.matched_value || '').trim();
+                        const groupContainer = card.querySelector(`#question-matching-${i}-input-${mIdx}-container`) ||
+                                               document.getElementById(`question-matching-${i}-input-${mIdx}-container`);
+                        const selectEl = card.querySelector(`#question-matching-${i}-select-${mIdx}`) ||
+                                         document.getElementById(`question-matching-${i}-select-${mIdx}`);
 
-                // 3. Fallback: Tìm theo nội dung text đáp án
-                if (matchedChoice && matchedChoice.content_plain) {
-                    const candidateDivs = document.querySelectorAll('.exam-content, .card-body');
-                    candidateDivs.forEach(div => {
-                        if (div.innerText && div.innerText.includes(matchedChoice.content_plain)) {
-                            const labels = div.querySelectorAll('label, p, span, div');
-                            labels.forEach(lbl => {
-                                if (lbl.innerText && lbl.innerText.trim() === matchedChoice.content_plain.trim()) {
-                                    applyHighlightToElement(lbl, `✅ ĐÁP ÁN ĐÚNG (${letter})`);
-                                }
-                            });
+                        if (groupContainer) {
+                            applyHighlightToElement(groupContainer, `✅ GHÉP: ${val}`);
+                        }
+                        if (selectEl) {
+                            selectEl.classList.add('__ai_highlighted_box');
+                            selectEl.style.border = '2px solid #10b981';
+                            selectEl.style.backgroundColor = '#ecfdf5';
+                            selectEl.style.color = '#065f46';
+                            selectEl.style.fontWeight = 'bold';
                         }
                     });
                 }
-            }
+            });
+            return;
+        }
 
-            // Xử lý câu hỏi Ghép đôi (Matching)
-            else if (q.type === 'matching' && Array.isArray(ans.matching)) {
-                ans.matching.forEach(pair => {
-                    const mIdx = pair.item_index;
-                    const val = String(pair.matched_value || '').trim();
+        // 2. Fallback cho giao diện tự render (__rendered_q_card)
+        const customCards = document.querySelectorAll('.__rendered_q_card');
+        if (customCards.length > 0) {
+            customCards.forEach(card => {
+                const qIdx = parseInt(card.dataset.index, 10);
+                const ans = solved[qIdx];
+                if (!ans) return;
 
-                    // Tìm select tự render
-                    const sel = document.querySelector(`select.__matching_select[data-q-index="${qIndex}"][data-m-index="${mIdx}"]`);
-                    if (sel) {
-                        sel.value = val;
-                        sel.style.border = '2px solid #10b981';
-                        sel.style.backgroundColor = '#ecfdf5';
-                        sel.style.color = '#065f46';
-                        sel.style.fontWeight = 'bold';
-                        const row = sel.closest('tr');
-                        if (row) applyHighlightToElement(row, `✅ Ghép: ${val}`);
-                    }
-
-                    // Tìm select trên giao diện gốc
-                    const allSelects = document.querySelectorAll('select');
-                    allSelects.forEach(s => {
-                        Array.from(s.options).forEach(opt => {
-                            if (opt.value === val || opt.textContent.trim() === val) {
-                                if (STATE.autoSelect) {
-                                    s.value = opt.value;
-                                    s.dispatchEvent(new Event('change', { bubbles: true }));
-                                }
-                                s.style.border = '2px solid #10b981';
-                                s.style.backgroundColor = '#ecfdf5';
+                if (ans.type === 'choice' && ans.selected_choice) {
+                    const letter = String(ans.selected_choice).trim().toUpperCase();
+                    const optRow = card.querySelector(`.__choice_option_row[data-choice-letter="${letter}"]`);
+                    if (optRow) applyHighlightToElement(optRow, `✅ ĐÁP ÁN: ${letter}`);
+                } else if (ans.type === 'matching' && Array.isArray(ans.matching)) {
+                    ans.matching.forEach(pair => {
+                        const mIdx = pair.item_index;
+                        const val = String(pair.matched_value || '').trim();
+                        const row = card.querySelector(`.__matching_row[data-m-index="${mIdx}"]`);
+                        if (row) {
+                            applyHighlightToElement(row, `✅ GHÉP: ${val}`);
+                            const sel = row.querySelector('.__matching_select');
+                            if (sel) {
+                                sel.classList.add('__ai_highlighted_box');
+                                sel.style.border = '2px solid #10b981';
+                                sel.style.backgroundColor = '#ecfdf5';
                             }
-                        });
+                        }
                     });
-                });
-            }
+                }
+            });
+        }
+    }
+
+    function clearAllHighlightsFromWebPage() {
+        document.querySelectorAll('.__ai_highlight_badge').forEach(b => b.remove());
+        document.querySelectorAll('.__ai_highlighted_box').forEach(el => {
+            el.classList.remove('__ai_highlighted_box');
+            el.style.backgroundColor = '';
+            el.style.border = '';
+            el.style.borderRadius = '';
+            el.style.boxShadow = '';
+            el.style.color = '';
+            el.style.fontWeight = '';
+        });
+        document.querySelectorAll('[id^="btn-question-"], .__nav_q_btn').forEach(btn => {
+            btn.style.boxShadow = '';
         });
     }
 
     function applyHighlightToElement(el, badgeText) {
         if (!el) return;
-        el.style.backgroundColor = '#ecfdf5';
+        el.classList.add('__ai_highlighted_box');
+        el.style.backgroundColor = 'rgba(16, 185, 129, 0.12)';
         el.style.border = '2px solid #10b981';
         el.style.borderRadius = '8px';
-        el.style.boxShadow = '0 0 12px rgba(16, 185, 129, 0.4)';
-        el.style.position = 'relative';
+        el.style.boxShadow = '0 0 10px rgba(16, 185, 129, 0.3)';
+        el.style.transition = 'all 0.2s ease';
 
         const oldBadge = el.querySelector('.__ai_highlight_badge');
         if (oldBadge) oldBadge.remove();
@@ -547,15 +573,261 @@
         badge.style.gap = '4px';
         badge.style.background = '#059669';
         badge.style.color = '#ffffff';
-        badge.style.fontSize = '12px';
+        badge.style.fontSize = '11px';
         badge.style.fontWeight = '700';
         badge.style.padding = '2px 8px';
         badge.style.borderRadius = '12px';
         badge.style.marginLeft = '8px';
-        badge.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+        badge.style.boxShadow = '0 2px 4px rgba(0,0,0,0.15)';
+        badge.style.verticalAlign = 'middle';
         badge.textContent = badgeText;
 
-        el.appendChild(badge);
+        const label = el.querySelector('label') || el;
+        label.appendChild(badge);
+    }
+
+    // ====== HÀM TỰ ĐỘNG ĐIỀN ĐÁP ÁN VÀO BÀI THI ======
+    function autoFillAllAnswersToPage() {
+        const solved = STATE.solvedAnswers;
+        const totalSolved = Object.keys(solved).length;
+        if (totalSolved === 0) {
+            showToast('⚠️ Chưa có đáp án nào được giải hoặc nạp!', 'error');
+            return;
+        }
+
+        let filledCount = 0;
+
+        // ƯU TIÊN 1: Hệ thống bài thi FPT Exam / EduNext (sử dụng testData toàn cục)
+        const currentTestData = (typeof testData !== 'undefined' && Array.isArray(testData)) ? testData : (window.testData || null);
+        if (currentTestData && currentTestData.length > 0) {
+            Object.keys(solved).forEach(key => {
+                const qIdx = parseInt(key, 10); // 1-based (1..25)
+                const ans = solved[qIdx];
+                const i = qIdx - 1; // 0-based
+                if (!currentTestData[i] || !ans) return;
+
+                const qData = currentTestData[i];
+
+                // 1. Trắc nghiệm (Choice)
+                if (qData.type === 'choice' && Array.isArray(qData.multiChooseAnswer)) {
+                    let targetOptIndex = -1;
+                    if (ans.selected_choice) {
+                        const raw = String(ans.selected_choice).trim().toUpperCase();
+                        const firstChar = raw.charAt(0);
+                        if (LETTERS.includes(firstChar)) {
+                            const letterIdx = LETTERS.indexOf(firstChar);
+                            if (letterIdx >= 0 && letterIdx < qData.multiChooseAnswer.length) {
+                                targetOptIndex = letterIdx;
+                            }
+                        }
+                    }
+
+                    if (targetOptIndex === -1 && (ans.selected_text || ans.selected_choice)) {
+                        const targetText = cleanHtmlContent(ans.selected_text || ans.selected_choice).toLowerCase();
+                        const foundIdx = qData.multiChooseAnswer.findIndex(opt => {
+                            const cleanOpt = cleanHtmlContent(opt.content).toLowerCase();
+                            return cleanOpt === targetText || (targetText.length > 3 && cleanOpt.includes(targetText));
+                        });
+                        if (foundIdx >= 0) targetOptIndex = foundIdx;
+                    }
+
+                    if (targetOptIndex >= 0) {
+                        if (typeof updateSingleChoiceValue === 'function') {
+                            updateSingleChoiceValue(i, targetOptIndex, true);
+                        } else if (typeof updateChoiceValue === 'function') {
+                            updateChoiceValue(i, targetOptIndex, true, false);
+                        } else {
+                            qData.multiChooseAnswer.forEach((opt, idx) => {
+                                opt.isChoose = (idx === targetOptIndex);
+                            });
+                            if (typeof notifyQuestionValueChanged === 'function') {
+                                notifyQuestionValueChanged(i);
+                            }
+                        }
+
+                        // Nếu câu hỏi này đang hiển thị trên DOM, tick luôn radio/checkbox
+                        const radioInp = document.getElementById(`question-single-${i}-option-${targetOptIndex}`) ||
+                                         document.getElementById(`question-multi-${i}-option-${targetOptIndex}`);
+                        if (radioInp) {
+                            radioInp.checked = true;
+                        }
+                        filledCount++;
+                    }
+                }
+
+                // 2. Ghép đôi (Matching)
+                else if (qData.type === 'matching' && Array.isArray(qData.questionMatching) && Array.isArray(ans.matching)) {
+                    let matchFilled = false;
+                    ans.matching.forEach(pair => {
+                        const mIdx = (pair.item_index || 1) - 1; // 0-based
+                        const val = String(pair.matched_value || '').trim();
+                        if (qData.questionMatching[mIdx]) {
+                            let matchedVal = val;
+                            if (Array.isArray(qData.answerMatching)) {
+                                const foundOpt = qData.answerMatching.find(o => 
+                                    String(o.answerMatchingValue).trim().toLowerCase() === val.toLowerCase() ||
+                                    String(o.answerMatchingContent).trim().toLowerCase() === val.toLowerCase()
+                                );
+                                if (foundOpt) matchedVal = foundOpt.answerMatchingValue;
+                            }
+
+                            if (typeof updateMatchingValue === 'function') {
+                                updateMatchingValue(i, mIdx, matchedVal);
+                            } else {
+                                qData.questionMatching[mIdx].answerMatchingChoice = matchedVal;
+                                if (typeof notifyQuestionValueChanged === 'function') {
+                                    notifyQuestionValueChanged(i);
+                                }
+                            }
+
+                            // Nếu select đang hiển thị trên DOM, chọn luôn option
+                            const selEl = document.getElementById(`question-matching-${i}-select-${mIdx}`);
+                            if (selEl) {
+                                selEl.value = matchedVal;
+                            }
+                            matchFilled = true;
+                        }
+                    });
+                    if (matchFilled) filledCount++;
+                }
+            });
+
+            // Re-render nội dung câu hiện tại để đồng bộ giao diện
+            if (typeof renderTestContent === 'function') {
+                try { renderTestContent(); } catch (e) {}
+            }
+
+            // Đồng bộ đáp án lưu vào server thi (chỉ gọi khi đang online trên server thi thật)
+            if (typeof backupSession === 'function' && window.location.protocol.startsWith('http') && !window.location.hostname.includes('localhost') && !window.location.hostname.includes('127.0.0.1')) {
+                try { backupSession(false, 0, true); } catch (e) {}
+            }
+        }
+
+        // ƯU TIÊN 2: Trang tự render hoặc DOM độc lập
+        else {
+            Object.keys(solved).forEach(key => {
+                const qIdx = parseInt(key, 10);
+                const ans = solved[qIdx];
+                if (!ans) return;
+
+                if (ans.type === 'choice' && ans.selected_choice) {
+                    const letter = String(ans.selected_choice).trim().toUpperCase();
+                    const card = document.getElementById(`__rendered_q_${qIdx}`);
+                    if (card) {
+                        const row = card.querySelector(`.__choice_option_row[data-choice-letter="${letter}"]`);
+                        if (row) {
+                            const radio = row.querySelector('input[type="radio"]');
+                            if (radio) {
+                                radio.checked = true;
+                                radio.dispatchEvent(new Event('change', { bubbles: true }));
+                                filledCount++;
+                            }
+                        }
+                    }
+                } else if (ans.type === 'matching' && Array.isArray(ans.matching)) {
+                    ans.matching.forEach(pair => {
+                        const mIdx = pair.item_index;
+                        const val = String(pair.matched_value || '').trim();
+                        const sel = document.querySelector(`select.__matching_select[data-q-index="${qIdx}"][data-m-index="${mIdx}"]`);
+                        if (sel) {
+                            sel.value = val;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            filledCount++;
+                        }
+                    });
+                }
+            });
+        }
+
+        // Áp dụng lại highlight nếu đang bật
+        if (STATE.showHighlight) {
+            applyHighlightsToCurrentPage();
+        }
+
+        showToast(`✅ Đã tự động điền ${filledCount}/${STATE.questions.length} câu vào bài thi!`, 'success');
+        showStatusBox(`✅ Đã tự động điền thành công ${filledCount}/${STATE.questions.length} câu hỏi vào bài thi! Toàn bộ câu đã được đánh dấu hoàn thành.`, 'success');
+    }
+
+    // ====== BẬT / TẮT NỔI BẬT ĐÁP ÁN ======
+    function toggleHighlight() {
+        STATE.showHighlight = !STATE.showHighlight;
+        localStorage.setItem('show_highlight_answers', String(STATE.showHighlight));
+
+        updateHighlightButtonUI();
+
+        if (STATE.showHighlight) {
+            applyHighlightsToCurrentPage();
+            showToast('👁️ Đã BẬT làm nổi bật đáp án đúng!', 'info');
+        } else {
+            clearAllHighlightsFromWebPage();
+            showToast('👁️‍🗨️ Đã TẮT làm nổi bật đáp án!', 'info');
+        }
+    }
+
+    function updateHighlightButtonUI() {
+        const toggleBtn = document.getElementById('__fab_toggle_highlight_btn');
+        if (toggleBtn) {
+            if (STATE.showHighlight) {
+                toggleBtn.textContent = '👁️ Nổi bật: BẬT';
+                toggleBtn.style.color = '#38bdf8';
+                toggleBtn.style.borderColor = '#0284c7';
+                toggleBtn.style.backgroundColor = 'rgba(2, 132, 199, 0.15)';
+            } else {
+                toggleBtn.textContent = '👁️‍🗨️ Nổi bật: TẮT';
+                toggleBtn.style.color = '#94a3b8';
+                toggleBtn.style.borderColor = '#334155';
+                toggleBtn.style.backgroundColor = '#1e293b';
+            }
+        }
+        const listToggleBtn = document.getElementById('__fab_list_toggle_hl_btn');
+        if (listToggleBtn) {
+            listToggleBtn.textContent = STATE.showHighlight ? '👁️ Nổi bật: BẬT' : '👁️‍🗨️ Nổi bật: TẮT';
+            listToggleBtn.style.color = STATE.showHighlight ? '#38bdf8' : '#94a3b8';
+        }
+    }
+
+    // Giám sát khi chuyển câu hỏi để tự động highlight câu mới
+    function setupExamContentObserver() {
+        const target = document.getElementById('div-exam-content') || document.getElementById('div-content');
+        if (!target || window.__examContentObserverAttached__) return;
+        window.__examContentObserverAttached__ = true;
+
+        const observer = new MutationObserver((mutations) => {
+            let hasChildChange = false;
+            for (const m of mutations) {
+                if (m.type === 'childList' && m.addedNodes.length > 0) {
+                    const isOurNode = Array.from(m.addedNodes).some(n => 
+                        n.nodeType === 1 && (n.classList?.contains('__ai_highlight_badge') || n.id === '__fab_overlay_root')
+                    );
+                    if (!isOurNode) {
+                        hasChildChange = true;
+                        break;
+                    }
+                }
+            }
+            if (hasChildChange && STATE.showHighlight && Object.keys(STATE.solvedAnswers).length > 0) {
+                clearTimeout(window.__highlightDebounceTimer);
+                window.__highlightDebounceTimer = setTimeout(() => {
+                    applyHighlightsToCurrentPage();
+                }, 50);
+            }
+        });
+
+        observer.observe(target, { childList: true, subtree: true });
+    }
+
+    function hookRenderTestContent() {
+        if (typeof window.renderTestContent === 'function' && !window.__renderTestContentHooked__) {
+            window.__renderTestContentHooked__ = true;
+            const origRender = window.renderTestContent;
+            window.renderTestContent = function (...args) {
+                const res = origRender.apply(this, args);
+                if (STATE.showHighlight) {
+                    setTimeout(applyHighlightsToCurrentPage, 40);
+                }
+                return res;
+            };
+        }
     }
 
     // ====== HÀM TẠO PROMPT AI TỔNG THỂ ======
@@ -809,7 +1081,7 @@
     }
 
     // ====== ÁP DỤNG ĐÁP ÁN VÀO HỆ THỐNG ======
-    function applyAnswers(answersList) {
+    function applyAnswers(answersList, shouldAutoFill = false) {
         if (!Array.isArray(answersList)) return;
 
         answersList.forEach(ans => {
@@ -819,10 +1091,15 @@
             }
         });
 
-        // 1. Làm nổi bật trên trang web
-        highlightAnswersOnWebPage(answersList);
+        // 1. Làm nổi bật trên trang web (chính xác theo câu đang xem)
+        applyHighlightsToCurrentPage();
 
-        // 2. Làm nổi bật trong giao diện Overlay
+        // 2. Tự động điền nếu được yêu cầu hoặc cấu hình bật
+        if (STATE.autoSelect || shouldAutoFill) {
+            autoFillAllAnswersToPage();
+        }
+
+        // 3. Cập nhật giao diện Overlay
         renderQuestionsList();
         updateUIState();
     }
@@ -1221,15 +1498,19 @@
             </div>
 
             <div class="__fab_subbar">
-                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#94a3b8; font-size:12px;">
-                    <input type="checkbox" id="__fab_auto_select_toggle" ${STATE.autoSelect ? 'checked' : ''}>
-                    <span>Tự động chọn vào bài</span>
-                </label>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <button type="button" class="__fab_btn" id="__fab_auto_fill_btn" style="background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#fff; font-weight:700; border:none; padding:4px 9px; font-size:11.5px; border-radius:6px; cursor:pointer;" title="Tự động điền tất cả đáp án đúng vào bài thi">
+                        📝 Tự động điền hết
+                    </button>
+                    <button type="button" class="__fab_btn" id="__fab_toggle_highlight_btn" style="background:#1e293b; color:${STATE.showHighlight ? '#38bdf8' : '#94a3b8'}; border:1px solid ${STATE.showHighlight ? '#0284c7' : '#334155'}; padding:4px 9px; font-size:11.5px; border-radius:6px; cursor:pointer;" title="Bật hoặc tắt viền xanh nổi bật trên trang thi">
+                        ${STATE.showHighlight ? '👁️ Nổi bật: BẬT' : '👁️‍🗨️ Nổi bật: TẮT'}
+                    </button>
+                </div>
                 <div style="display:flex; gap:6px;">
-                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_questions_tab_btn" style="padding:3px 8px; font-size:11px;">
+                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_questions_tab_btn" style="padding:4px 8px; font-size:11px;">
                         📄 Đề thi
                     </button>
-                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_reset_btn" style="padding:3px 8px; font-size:11px; color:#f87171;">
+                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_reset_btn" style="padding:4px 8px; font-size:11px; color:#f87171;">
                         🗑️ Xóa đáp án
                     </button>
                 </div>
@@ -1259,7 +1540,8 @@
     const settingsTabBtn = document.getElementById('__fab_settings_tab_btn');
     const questionsTabBtn = document.getElementById('__fab_questions_tab_btn');
     const resetBtn = document.getElementById('__fab_reset_btn');
-    const autoSelectToggle = document.getElementById('__fab_auto_select_toggle');
+    const autoFillBtn = document.getElementById('__fab_auto_fill_btn');
+    const toggleHighlightBtn = document.getElementById('__fab_toggle_highlight_btn');
     const contentArea = document.getElementById('__fab_content_area');
     const quickNav = document.getElementById('__fab_quick_nav');
     const statusBox = document.getElementById('__fab_status_box');
@@ -1368,6 +1650,32 @@
             const reloadBtn = document.getElementById('__fab_reload_extract_btn');
             if (reloadBtn) reloadBtn.addEventListener('click', initExtraction);
             return;
+        }
+
+        // Action banner ở đầu danh sách câu hỏi
+        const solvedCount = Object.keys(STATE.solvedAnswers).length;
+        if (solvedCount > 0) {
+            const banner = document.createElement('div');
+            banner.style.cssText = 'background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px;';
+            banner.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:12.5px; font-weight:700; color:#38bdf8;">✨ Đã có ${solvedCount}/${STATE.questions.length} đáp án</span>
+                    <button type="button" class="__fab_btn" id="__fab_list_toggle_hl_btn" style="background:#0f172a; color:${STATE.showHighlight ? '#38bdf8' : '#94a3b8'}; border:1px solid ${STATE.showHighlight ? '#0284c7' : '#334155'}; padding:3px 8px; font-size:11px; border-radius:6px; cursor:pointer;">
+                        ${STATE.showHighlight ? '👁️ Nổi bật: BẬT' : '👁️‍🗨️ Nổi bật: TẮT'}
+                    </button>
+                </div>
+                <button type="button" class="__fab_btn" id="__fab_list_autofill_btn" style="background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#fff; font-weight:700; border:none; padding:7px 12px; font-size:12px; border-radius:6px; cursor:pointer; width:100%;">
+                    📝 TỰ ĐỘNG ĐIỀN TẤT CẢ ${solvedCount} ĐÁP ÁN VÀO BÀI THI
+                </button>
+            `;
+            contentArea.appendChild(banner);
+
+            setTimeout(() => {
+                const listAutoFill = document.getElementById('__fab_list_autofill_btn');
+                if (listAutoFill) listAutoFill.addEventListener('click', autoFillAllAnswersToPage);
+                const listHlBtn = document.getElementById('__fab_list_toggle_hl_btn');
+                if (listHlBtn) listHlBtn.addEventListener('click', toggleHighlight);
+            }, 0);
         }
 
         STATE.questions.forEach(q => {
@@ -1490,18 +1798,23 @@
                     <textarea class="__fab_textarea" id="__fab_paste_input" placeholder='Dán nội dung JSON hoặc văn bản AI vào đây... Ví dụ:&#10;{&#10;  "answers": [&#10;    { "question_index": 1, "selected_choice": "E" },&#10;    { "question_index": 2, "matching": [{ "item_index": 1, "matched_value": "1" }] }&#10;  ]&#10;}'></textarea>
                 </div>
 
-                <div style="display:flex; gap:8px;">
-                    <button type="button" class="__fab_btn __fab_btn_primary" id="__fab_apply_paste_btn" style="flex:1;">
-                        ⚡ Kích hoạt & Làm nổi bật đáp án
-                    </button>
-                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_clear_paste_btn">
-                        Xóa ô
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="__fab_btn __fab_btn_primary" id="__fab_apply_paste_btn" style="flex:1;">
+                            ✨ Nạp & Nổi bật đáp án
+                        </button>
+                        <button type="button" class="__fab_btn" id="__fab_paste_and_fill_btn" style="flex:1.2; background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#fff; font-weight:700; border:none; padding:9px 10px; font-size:12.5px; border-radius:8px; cursor:pointer;" title="Nạp đáp án và tự động chọn luôn vào bài thi FPT">
+                            📝 Nạp & TỰ ĐỘNG ĐIỀN BÀI
+                        </button>
+                    </div>
+                    <button type="button" class="__fab_btn __fab_btn_secondary" id="__fab_clear_paste_btn" style="width:100%;">
+                        🗑️ Xóa ô nhập
                     </button>
                 </div>
             </div>
         `;
 
-        document.getElementById('__fab_apply_paste_btn').addEventListener('click', () => {
+        function handleProcessPaste(autoFillNow) {
             const textVal = document.getElementById('__fab_paste_input').value.trim();
             if (!textVal) {
                 showToast('⚠️ Vui lòng dán câu trả lời vào ô!', 'error');
@@ -1514,11 +1827,19 @@
                 return;
             }
 
-            applyAnswers(answers);
-            showToast(`✅ Đã làm nổi bật ${answers.length} câu hỏi thành công!`, 'success');
-            showStatusBox(`✅ Đã nạp thành công ${answers.length}/${STATE.questions.length} đáp án từ văn bản!`, 'success');
+            applyAnswers(answers, autoFillNow);
+            if (autoFillNow) {
+                showToast(`✅ Đã nạp và TỰ ĐỘNG ĐIỀN ${answers.length} câu vào bài thi!`, 'success');
+                showStatusBox(`✅ Đã nạp thành công và tự động điền ${answers.length}/${STATE.questions.length} câu hỏi vào bài thi!`, 'success');
+            } else {
+                showToast(`✅ Đã nạp và làm nổi bật ${answers.length} câu hỏi thành công!`, 'success');
+                showStatusBox(`✅ Đã nạp thành công ${answers.length}/${STATE.questions.length} đáp án từ văn bản!`, 'success');
+            }
             switchTab('questions');
-        });
+        }
+
+        document.getElementById('__fab_apply_paste_btn').addEventListener('click', () => handleProcessPaste(false));
+        document.getElementById('__fab_paste_and_fill_btn').addEventListener('click', () => handleProcessPaste(true));
 
         document.getElementById('__fab_clear_paste_btn').addEventListener('click', () => {
             document.getElementById('__fab_paste_input').value = '';
@@ -1591,6 +1912,9 @@
 
     // ====== KHỞI TẠO VÀ TRÍCH XUẤT ĐỀ BÀI ======
     function initExtraction() {
+        hookRenderTestContent();
+        setupExamContentObserver();
+
         let questions = extractQuestionsFromScripts();
 
         if (!questions || !questions.length) {
@@ -1603,6 +1927,9 @@
             ensureExamRenderedOnPage();
             updateUIState();
             renderTabContent();
+            if (STATE.showHighlight && Object.keys(STATE.solvedAnswers).length > 0) {
+                applyHighlightsToCurrentPage();
+            }
         } else {
             setTimeout(() => {
                 const retryQ = extractQuestionsFromScripts() || extractQuestionsFromDOM();
@@ -1611,6 +1938,9 @@
                     ensureExamRenderedOnPage();
                     updateUIState();
                     renderTabContent();
+                    if (STATE.showHighlight && Object.keys(STATE.solvedAnswers).length > 0) {
+                        applyHighlightsToCurrentPage();
+                    }
                 }
             }, 600);
         }
@@ -1655,32 +1985,21 @@
     settingsTabBtn.addEventListener('click', () => switchTab('settings'));
     questionsTabBtn.addEventListener('click', () => switchTab('questions'));
 
-    autoSelectToggle.addEventListener('change', (e) => {
-        STATE.autoSelect = e.target.checked;
-        localStorage.setItem('auto_select_answers', String(STATE.autoSelect));
-        showToast(STATE.autoSelect ? 'Đã bật tự động chọn đáp án' : 'Đã tắt tự động chọn đáp án', 'info');
-        if (STATE.autoSelect) {
-            highlightAnswersOnWebPage(Object.values(STATE.solvedAnswers));
-        }
-    });
+    if (autoFillBtn) {
+        autoFillBtn.addEventListener('click', autoFillAllAnswersToPage);
+    }
+
+    if (toggleHighlightBtn) {
+        toggleHighlightBtn.addEventListener('click', toggleHighlight);
+    }
 
     resetBtn.addEventListener('click', () => {
         if (!confirm('Bạn có chắc muốn xóa tất cả đáp án đã giải?')) return;
         STATE.solvedAnswers = {};
-        document.querySelectorAll('.__ai_highlight_badge').forEach(b => b.remove());
-        document.querySelectorAll('.__choice_option_row, .__rendered_q_card, tr, label, div').forEach(el => {
-            el.style.backgroundColor = '';
-            el.style.border = '';
-            el.style.boxShadow = '';
-        });
-        document.querySelectorAll('.__nav_q_btn').forEach(btn => {
-            btn.style.backgroundColor = '';
-            btn.style.borderColor = '';
-            btn.style.color = '';
-        });
+        clearAllHighlightsFromWebPage();
         updateUIState();
         renderTabContent();
-        showToast('Đã xóa tất cả đáp án.', 'info');
+        showToast('Đã xóa tất cả đáp án và làm sạch trang thi.', 'info');
     });
 
     // Phím tắt bàn phím: F2 hoặc Escape
@@ -1708,6 +2027,8 @@
         getQuestions: () => STATE.questions,
         solveWithAPI: solveAllWithGeminiAPI,
         copyPrompt: () => copyPromptBtn.click(),
-        applyAnswers: applyAnswers
+        applyAnswers: applyAnswers,
+        autoFillAll: autoFillAllAnswersToPage,
+        toggleHighlight: toggleHighlight
     };
 })();
